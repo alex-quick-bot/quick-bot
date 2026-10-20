@@ -1,7 +1,7 @@
 python-telegram-bot==20.7
-yfinance==0.2.31
-requests==2.31.0
-pandas==2.1.4
-numpy==1.26.2
-lxml==5.1.0
+yfinance
+requests
+pandas
+numpy
+lxml
 Flask==2.3.3

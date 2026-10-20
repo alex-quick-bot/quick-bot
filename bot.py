@@ -3,9 +3,6 @@ from flask import Flask
 
 TOKEN = os.environ.get("TOKEN", "")
 BASE = f"https://api.telegram.org/bot{TOKEN}"
-
-# === SET YOUR ID HERE ===
-# After you test /id, put your ID here. You will always be free.
 OWNER_ID = 8665686560
 TRIAL_USED = set()
 

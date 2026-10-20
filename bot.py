@@ -6,7 +6,7 @@ BASE = f"https://api.telegram.org/bot{TOKEN}"
 
 # === SET YOUR ID HERE ===
 # After you test /id, put your ID here. You will always be free.
-OWNER_ID = 0  # <-- replace 0 with your ID from /id command
+OWNER_ID = 8665686560
 PAID_USERS = [] # will auto include OWNER_ID
 TRIAL_USED = set()
 

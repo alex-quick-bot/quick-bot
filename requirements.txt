@@ -1,3 +1,5 @@
+Flask==2.3.3
+yfinance==0.2.31
 python-telegram-bot==20.7
-yfinance
-Flask
+pandas==2.1.4
+numpy==1.26.2

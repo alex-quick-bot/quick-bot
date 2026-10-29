@@ -190,20 +190,22 @@ def check_alert(orig,d):
         alert=f"🚀 FATHER GOLDEN CROSS {orig} ${curr:.2f} TIER {tier}% EMA12>{ema26:.1f} MACD {d.get('macd',0):.2f}"
     last_state[key]={"rsi":rsi,"ema12":ema12,"ema26":ema26}
     return alert
-
 async def scan_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     syms=user_symbols.get(update.effective_user.id,["NFT","TREASURY","BONDS","AGRI","REALESTATE","SPX","AUTO","ICT","COFFEE","OILGAS","GOLD","CRYPTO","AI","TESLA"])
-    await update.message.reply_text(f"👑 FATHER V12 PRIVATE - Scanning {len(syms)} sectors LIVE MTF...")
-    batch=""
-    for i,sym in enumerate(syms,1):
-        d=await asyncio.to_thread(get_data, sym)
-        if not d: batch+=f"❌ {sym} No data\n---\n"
-        else: batch+=make_text(sym.upper(), d)+"\n"
-        if i%3==0:
-            await update.message.reply_text(batch)
-            batch=""; await asyncio.sleep(0.5)
-    if batch: await update.message.reply_text(batch)
-    await update.message.reply_text(f"✅ FATHER DONE {len(syms)} sectors! /auto on to hunt while you sleep!")
+    await update.message.reply_text(f"👑 FATHER V12 PRIVATE - Scanning {len(syms)} LIVE...")
+    for sym in syms:
+        try:
+            d=await asyncio.wait_for(asyncio.to_thread(get_data, sym), timeout=15)
+            if not d:
+                await update.message.reply_text(f"❌ {sym} No data — Yahoo blocked, retry")
+            else:
+                await update.message.reply_text(make_text(sym.upper(), d))
+        except asyncio.TimeoutError:
+            await update.message.reply_text(f"⏳ {sym} timeout — Yahoo slow")
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ {sym} error {e}")
+        await asyncio.sleep(1)
+    await update.message.reply_text(f"✅ FATHER DONE {len(syms)}")
 
 async def all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_symbols[update.effective_user.id]=["NFT","TREASURY","BONDS","AGRI","REALESTATE","SPX","AUTO","ICT","COFFEE","OILGAS","GOLD","CRYPTO","AI","TESLA"]

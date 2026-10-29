@@ -77,7 +77,7 @@ def get_signal(ticker):
         if len(g) < 14 or len(l) < 14:
             return f"🔥 LIVE {ticker} ${last:.2f} {pct:+.2f}% — collecting RSI, tap again"
         g_last = float(g.iloc[-1]); l_last = float(l.iloc[-1])
-        rsi = 100 - (100/(1+g_last/l_last)) if l_last != 0 else 50.0)
+        rsi = 100 - (100/(1+g_last/l_last)) if l_last != 0 else 50.0
         ema = float(c.ewm(span=20, adjust=False).mean().iloc[-1])
         is_crypto = "-USD" in ticker
         is_weekend = datetime.utcnow().weekday() >= 5

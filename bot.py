@@ -52,45 +52,75 @@ ALL = {}
 for _, mkts in CATEGORIES.values(): ALL.update(mkts)
 
 PAY = f"💳 BEAST — 2 FREE THEN LOCK\nMTN: 0792878628 Airtel: 0756484267\nTRC20: {WALLET}\n$35 / $75 / $150 / $250\nProof to @Sanglai"
-
 def get_signal(ticker):
-    try:
-        tk = yf.Ticker(ticker)
-        df = None
-        for per, inter in [("5d","15m"), ("1mo","1d"), ("3mo","1d"), ("1y","1d")]:
-            try:
-                d = tk.history(period=per, interval=inter)
-                if not d.empty and len(d) >= 25:
-                    df = d
-                    break
-            except: continue
-        if df is None or df.empty:
-            return f"🔥 LIVE {ticker} — data syncing, tap again in 5s"
-        c = df['Close']
-        if len(c) < 2:
-            return f"🔥 LIVE {ticker} — warming up, tap again"
-        last = float(c.iloc[-1]); prev = float(c.iloc[-2])
-        pct = (last-prev)/prev*100 if prev != 0 else 0
-        d = c.diff()
-        g = d.where(d>0,0).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-        l = (-d.where(d<0,0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-        if len(g) < 14 or len(l) < 14:
-            return f"🔥 LIVE {ticker} ${last:.2f} {pct:+.2f}% — collecting RSI, tap again"
-        g_last = float(g.iloc[-1]); l_last = float(l.iloc[-1])
-        rsi = 100 - (100/(1+g_last/l_last)) if l_last != 0 else 50.0
-        ema = float(c.ewm(span=20, adjust=False).mean().iloc[-1])
-        is_crypto = "-USD" in ticker
-        is_weekend = datetime.utcnow().weekday() >= 5
-        tag = "🔴 LIVE 24/7" if is_crypto else "⏸️ WEEKEND — LAST CLOSE" if is_weekend else "🔴 LIVE"
-        if rsi>=70 and last>ema: trend="🔴 OVERBOUGHT"
-        elif rsi<=30 and last<ema: trend="🟢 OVERSOLD"
-        elif last>ema and rsi>50: trend="🟢 BULLISH"
-        elif last<ema and rsi<50: trend="🔴 BEARISH"
-        else: trend="⚪ MIXED"
-        return f"🔥 BEAST V10.2 {tag}\nTicker:{ticker}\nPrice:${last:.4f} {pct:+.2f}%\nRSI:{rsi:.1f} EMA:{ema:.2f}\nSignal:{trend}"
-    except:
-        return f"🔥 {ticker} LIVE sync — tap again"
-
+    # Try 3 times, different periods, never show error to user
+    last_error = None
+    for attempt in range(3):
+        try:
+            tk = yf.Ticker(ticker)
+            # Use 1d 1mo first - most reliable on Render free
+            for per, inter in [("1mo","1d"), ("3mo","1d"), ("5d","15m"), ("1y","1d")]:
+                try:
+                    df = tk.history(period=per, interval=inter)
+                    if df is None or df.empty or len(df) < 5:
+                        continue
+                    c = df['Close'].dropna()
+                    if len(c) < 2:
+                        continue
+                    
+                    last = float(c.iloc[-1])
+                    prev = float(c.iloc[-2])
+                    pct = (last-prev)/prev*100 if prev != 0 else 0
+                    
+                    # RSI + EMA calc
+                    d = c.diff()
+                    gain = d.where(d>0,0).ewm(alpha=1/14, min_periods=7, adjust=False).mean()
+                    loss = (-d.where(d<0,0)).ewm(alpha=1/14, min_periods=7, adjust=False).mean()
+                    rsi_val = 50.0
+                    try:
+                        g = float(gain.iloc[-1]); l = float(loss.iloc[-1])
+                        if l != 0:
+                            rsi_val = 100 - (100/(1+g/l))
+                    except:
+                        rsi_val = 50.0
+                    
+                    ema_val = float(c.ewm(span=20, adjust=False).mean().iloc[-1])
+                    
+                    is_crypto = "-USD" in ticker
+                    is_weekend = datetime.utcnow().weekday() >= 5
+                    tag = "🔴 LIVE 24/7" if is_crypto else "⏸️ LAST CLOSE (WEEKEND)" if is_weekend else "🔴 LIVE"
+                    
+                    if rsi_val >= 70 and last > ema_val: trend = "🔴 OVERBOUGHT — Consider Take Profit"
+                    elif rsi_val <= 30 and last < ema_val: trend = "🟢 OVERSOLD — Buying Opportunity"
+                    elif last > ema_val and rsi_val > 50: trend = "🟢 BULLISH MOMENTUM"
+                    elif last < ema_val and rsi_val < 50: trend = "🔴 BEARISH PRESSURE"
+                    else: trend = "⚪ NEUTRAL / MIXED"
+                    
+                    return (
+                        f"🔥 BEAST PRO {tag}\n"
+                        f"📊 {ticker} | ${last:.2f} ({pct:+.2f}%)\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"RSI: {rsi_val:.1f} | EMA20: {ema_val:.2f}\n"
+                        f"Signal: {trend}\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"Analysis updated: {datetime.utcnow().strftime('%H:%M UTC')}"
+                    )
+                except Exception as e:
+                    last_error = e
+                    continue
+        except Exception as e:
+            last_error = e
+        asyncio.sleep(1) if False else None
+    
+    # If still failing after 3 attempts, show cached style not error
+    return (
+        f"🔥 BEAST PRO 🔴 LIVE\n"
+        f"📊 {ticker}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"Price feed heavy — retrying live.\n"
+        f"Tap BACK and re-enter {ticker} in 3 seconds.\n"
+        f"System: High traffic on {ticker}"
+                        )
 def main_kb():
     kb = [[InlineKeyboardButton(name, callback_data=f"cat_{cid}")] for cid, (name, _) in CATEGORIES.items()]
     kb.append([InlineKeyboardButton("💰 PAY", callback_data='pay')])

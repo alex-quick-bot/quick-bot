@@ -3,14 +3,14 @@ from flask import Flask
 import threading, yfinance as yf, asyncio, time
 from datetime import date as _date
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or "0")  # set your ID in Render env
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or "0")
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "BEAST FATHER V12 PRIVATE - LIVE MTF MARKET ORGANIZED + MT5 🔥"
+def home(): return "BEAST FATHER V13 SERV - LIVE MTF + MT5 🔥"
 def run_flask(): app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
 
 # === STATE ===
@@ -116,7 +116,7 @@ def mt5_place_order(symbol_mt5, order_type, lot, stop_loss=0, take_profit=0):
            "type": mt5.ORDER_TYPE_BUY if order_type=="BUY" else mt5.ORDER_TYPE_SELL,
            "price": tick.ask if order_type=="BUY" else tick.bid,
            "sl": float(stop_loss),"tp": float(take_profit),"deviation": 20,"magic": 123456,
-           "comment": "FATHER V12","type_time": mt5.ORDER_TIME_GTC,"type_filling": mt5.ORDER_FILLING_IOC}
+           "comment": "FATHER V13","type_time": mt5.ORDER_TIME_GTC,"type_filling": mt5.ORDER_FILLING_IOC}
     result = mt5.order_send(req)
     if result.retcode != mt5.TRADE_RETCODE_DONE: return f"FAILED {mt5_symbol} {result.retcode} {result.comment}"
     return f"✅ EXECUTED {order_type} {mt5_symbol} {lot} lot Ticket {result.order}"
@@ -194,32 +194,84 @@ def _f(v, fmt=".1f"):
     try: return format(float(v), fmt)
     except: return "—"
 
+# === SERV LAYER - Multipath + Shadow + PromptGuard + Benchmark ===
+SERV_SIGNAL_LOG = []
+
+def multipath_vote(d):
+    votes = {"BUY": 0, "SELL": 0, "HOLD": 0}
+    rsi = d["rsi"]
+    if rsi < 38: votes["BUY"] += 1
+    elif rsi > 68: votes["SELL"] += 1
+    else: votes["HOLD"] += 1
+    if d["ema12"] > d["ema26"] and d.get("macd", 0) > 0: votes["BUY"] += 1
+    elif d["ema12"] < d["ema26"] and d.get("macd", 0) < 0: votes["SELL"] += 1
+    else: votes["HOLD"] += 1
+    if d["curr"] > d["sma20"] and d.get("vol_mult", 1) > 0.8: votes["BUY"] += 1
+    elif d["curr"] < d["sma20"] and d.get("vol_mult", 1) > 0.8: votes["SELL"] += 1
+    else: votes["HOLD"] += 1
+    winner = max(votes, key=votes.get)
+    confidence = votes[winner]
+    return winner, confidence, votes
+
+def shadow_check(d, action):
+    reasons = []
+    if d["rsi"] > 90 or d["rsi"] < 10:
+        reasons.append(f"RSI extreme {d['rsi']:.1f}")
+    if d.get("vol_mult", 1) < 0.3:
+        reasons.append(f"Volume low x{d.get('vol_mult',1):.2f}")
+    if d.get("atr", 0) == 0 or d.get("atr", 0) > d["curr"] * 0.1:
+        reasons.append("ATR abnormal")
+    vote, conf, _ = multipath_vote(d)
+    if conf < 2 and action in ("BUY", "SELL"):
+        reasons.append(f"Multipath weak {conf}/3 vote={vote}")
+    return reasons
+
+def prompt_guard(text):
+    if not text: return True, "OK"
+    bad = ["ignore your rules", "ignore previous", "disable guard", "guaranteed profit",
+           "tell me to buy", "override", "jailbreak", "developer mode", "pretend you are"]
+    t = text.lower()
+    for b in bad:
+        if b in t:
+            return False, f"Blocked: '{b}'"
+    return True, "OK"
+
 def make_text(orig,d):
     curr=d["curr"]; rsi=d["rsi"]; ema12=d["ema12"]; ema26=d["ema26"]; sma20=d["sma20"]; high20=d["high20"]; low20=d["low20"]; tier=d["tier"]
     macd=d.get("macd",0); atr=d.get("atr", curr*0.02); vol=d.get("vol",0); vol_mult=d.get("vol_mult",1)
     ema50=d.get("ema50")
-    if rsi<30:
-        action="💎💎 FATHER STRONG BUY"; reason=f"Oversold + MACD {_f(macd)} Vol x{_f(vol_mult)}"
-        tgt=curr+3*atr; stp=_safe_stop(curr, low20*0.98, True); prof="+8% (ATR)"
-    elif rsi<38 and ema12>ema26:
-        action="💎 FATHER BUY"; reason=f"Cheap + Bullish MACD {_f(macd)}"
-        tgt=high20; stp=_safe_stop(curr, sma20*0.97, True); prof="+5-7%"
-    elif rsi>75:
-        action="⚠️⚠️ FATHER STRONG SELL"; reason=f"Overbought RSI {_f(rsi)} Vol x{_f(vol_mult)}"
-        tgt=sma20; stp=_safe_stop(curr, high20*1.02, False); prof="SELL"
-    elif ema12>ema26 and curr>sma20:
-        action="🚀 FATHER BULLISH BREAKOUT"; reason=f"Above EMA20/50 Vol x{_f(vol_mult)}"
-        tgt=curr+2*atr; stp=_safe_stop(curr, curr-2*atr, True); prof="+4-6%"
+
+    vote, conf, votes = multipath_vote(d)
+    shadow_reasons = shadow_check(d, vote)
+
+    if shadow_reasons:
+        action = "➡️ FATHER HOLD - SHADOW BLOCKED"
+        reason = f"Shadow: {'; '.join(shadow_reasons)} | Vote {votes}"
+        tgt = high20; stp = low20; prof = "Blocked - No Trade"
+    elif vote == "BUY" and conf >= 2:
+        action = f"💎 FATHER BUY {conf}/3" if conf == 2 else "💎💎 FATHER STRONG BUY 3/3"
+        reason = f"Multipath {votes} MACD {_f(macd)} Vol x{_f(vol_mult)}"
+        tgt = curr + 3*atr; stp = _safe_stop(curr, low20*0.98, True); prof = "+8% (ATR)"
+    elif vote == "SELL" and conf >= 2:
+        action = f"⚠️ FATHER SELL {conf}/3" if conf == 2 else "⚠️⚠️ FATHER STRONG SELL 3/3"
+        reason = f"Multipath {votes} RSI {_f(rsi)} Vol x{_f(vol_mult)}"
+        tgt = sma20; stp = _safe_stop(curr, high20*1.02, False); prof = "SELL"
+    elif vote == "BUY":
+        action = "🚀 FATHER BULLISH BREAKOUT 1/3 - WEAK"
+        reason = f"Only 1 path agrees {votes} - confirm before entry"
+        tgt = curr + 2*atr; stp = _safe_stop(curr, curr-2*atr, True); prof = "+4-6% WEAK"
     else:
-        action="➡️ FATHER HOLD"; reason=f"RSI {_f(rsi)} EMA {_f(ema12)}/{_f(ema26)}/{_f(ema50)}"
-        tgt=high20; stp=low20; prof="Hold"
+        action = "➡️ FATHER HOLD"
+        reason = f"Multipath {votes} RSI {_f(rsi)}"
+        tgt = high20; stp = low20; prof = "Hold"
     comp=SECTOR_COMPANIES.get(orig, orig)
-    return (f"👑 {action} {orig} TIER {tier}% | FATHER V12\n"
+    return (f"👑 {action} {orig} TIER {tier}% | FATHER V13 SERV\n"
             f"💰 ${curr:.2f} RSI {_f(rsi)} EMA {_f(ema12)}/{_f(ema26)}/{_f(ema50)} | MACD {_f(macd)}\n"
             f"📊 Vol {vol:,.0f} x{_f(vol_mult)} ATR ${atr:.2f} | Range ${low20:.2f}-${high20:.2f}\n"
             f"💡 {reason}\n"
             f"🎯 ENTRY ${curr:.2f} STOP ${stp:.2f} TARGET ${tgt:.2f} {prof}\n"
-            f"🏢 {comp}\n---")
+            f"🧠 SERV Vote: {votes} | Confidence {conf}/3 | Shadow: {'PASS' if not shadow_reasons else 'BLOCKED'}\n"
+            f"🏢 {comp}\n---\n⚠️ Not financial advice - 1% risk only")
 
 def check_alert(orig,d):
     rsi=d["rsi"]; ema12=d["ema12"]; ema26=d["ema26"]; curr=d["curr"]; tier=d["tier"]
@@ -240,7 +292,7 @@ def check_alert(orig,d):
 # === COMMANDS ===
 async def scan_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     syms=user_symbols.get(update.effective_user.id, DEFAULT_SYMBOLS)
-    await update.message.reply_text(f"👑 FATHER V12 PRIVATE - Scanning {len(syms)} sectors by MARKET...")
+    await update.message.reply_text(f"👑 FATHER V13 SERV - Scanning {len(syms)} sectors by MARKET...")
     grouped = {}
     for market, group_syms in MARKET_GROUPS.items():
         for s in group_syms:
@@ -261,13 +313,13 @@ async def scan_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_symbols[update.effective_user.id]=DEFAULT_SYMBOLS
-    await update.message.reply_text("🌍 ALL 13 LOCKED (COFFEE removed) — Market organized!\n🏦 Bonds | 🛢️ Commodities | 🏠 Real | 💻 Tech | ₿ Crypto\n/scan to see")
+    await update.message.reply_text("🌍 ALL 13 LOCKED — Market organized!\n🏦 Bonds | 🛢️ Commodities | 🏠 Real | 💻 Tech | ₿ Crypto\n/scan to see")
 
 async def myalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Use /all or /myalerts ICT AUTO GOLD..."); return
     user_symbols[update.effective_user.id]=[s.upper() for s in context.args[:13]]
-    await update.message.reply_text(f"✅ Locked: {', '.join(user_symbols[update.effective_user.id])} FATHER V12")
+    await update.message.reply_text(f"✅ Locked: {', '.join(user_symbols[update.effective_user.id])} FATHER V13 SERV")
 
 async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -276,7 +328,7 @@ async def auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lim = _get_limit(uid); pnl = _get_pnl_record(uid)["pnl"]
             await update.message.reply_text(f"🛑 Loss limit -${lim:.2f} hit (P&L ${pnl:+.2f}). Paused till tomorrow. /pnl /setlimit"); return
         auto_users.add(uid)
-        await update.message.reply_text("✅ FATHER Auto ON! 30s live hunter with Wilder RSI+MACD+ATR!")
+        await update.message.reply_text("✅ FATHER Auto ON! 30s live hunter with SERV Multipath+Shadow!")
     else:
         auto_users.discard(uid)
         await update.message.reply_text("❌ Auto OFF")
@@ -322,8 +374,23 @@ async def alertstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"{sym}: {rec['count']}/{MAX_ALERTS_PER_SYMBOL_PER_DAY}" for sym, rec in alert_tracker.items()]
     await update.message.reply_text("📊 Alert usage today:\n" + "\n".join(lines))
 
+async def benchmark_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not SERV_SIGNAL_LOG:
+        await update.message.reply_text("No SERV signals logged yet. Turn /auto on first."); return
+    total = len(SERV_SIGNAL_LOG)
+    strong = sum(1 for s in SERV_SIGNAL_LOG if s["conf"] == 3)
+    await update.message.reply_text(f"📊 SERV BENCHMARK\nSignals sent: {total}\nStrong 3/3: {strong}\nUse /logtrade to log real results for win-rate.\n⚠️ Not financial advice - 1% risk only.")
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👑 BEAST FATHER V12 PRIVATE FINAL!\nMarket organized V7 style, COFFEE removed, MT5 ready\n/all -> /scan -> /auto on\nAuto-trade: /mt5login /autotrade on /setlot 0.01 /setmt5 BTC GOLD\nRisk: /logtrade /setlimit /pnl /alertstats")
+    await update.message.reply_text("👑 BEAST FATHER V13 SERV FINAL!\nMultipath Vote + Shadow Check + PromptGuard + Benchmark\n/all -> /scan -> /auto on\nAuto-trade: /mt5login /autotrade on /setlot 0.01 /setmt5 BTC GOLD\nRisk: /logtrade /setlimit /pnl /alertstats /benchmark")
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text or ""
+    ok, msg = prompt_guard(text)
+    if not ok:
+        await update.message.reply_text(f"🛡️ SERV PromptGuard blocked that.\n{msg}\nUse /scan for signals. Not financial advice.")
+        return
+    await update.message.reply_text("Use /scan for signals, /all for all markets, /auto on for alerts. Not financial advice.")
 
 # MT5 COMMANDS
 async def mt5login_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -337,7 +404,7 @@ async def autotrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Auto-trade is {status}\nUse: /autotrade on or off\nThen /setmt5 BTC GOLD\n/setlot 0.01"); return
     if context.args[0].lower()=="on":
         AUTO_TRADE_ENABLED.add(uid)
-        await update.message.reply_text("🤖 FATHER AUTO-TRADE ON — will EXECUTE on MT5 when signal fires!\nSet lot /setlot 0.01 and symbols /setmt5")
+        await update.message.reply_text("🤖 FATHER AUTO-TRADE ON — will EXECUTE on MT5 when SERV passes!\nSet lot /setlot 0.01 and symbols /setmt5")
     else:
         AUTO_TRADE_ENABLED.discard(uid)
         await update.message.reply_text("❌ Auto-trade OFF — alerts only")
@@ -358,7 +425,7 @@ async def setmt5_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AUTO_SYMBOLS[uid]=set([s.upper() for s in context.args])
     await update.message.reply_text(f"✅ Auto-trade only: {', '.join(AUTO_SYMBOLS[uid])}")
 
-# === HUNTER LOOP WITH AUTO-TRADE ===
+# === HUNTER LOOP WITH AUTO-TRADE + SERV ===
 async def hunter_loop(app_bot):
     while True:
         try:
@@ -376,6 +443,14 @@ async def hunter_loop(app_bot):
                 if not d: continue
                 alert, trade_action, full_d = check_alert(sym.upper(), d)
                 if alert:
+                    # SERV Shadow check before sending / executing
+                    if trade_action:
+                        _vote, _conf, _v = multipath_vote(full_d)
+                        _shadow = shadow_check(full_d, trade_action)
+                        if _shadow or _conf < 2:
+                            print(f"SERV BLOCK {sym} vote={_vote} {_conf}/3 shadow={_shadow}")
+                            continue
+                        SERV_SIGNAL_LOG.append({"sym": sym, "action": trade_action, "price": full_d["curr"], "conf": _conf, "time": time.time()})
                     if not _alert_allowed(sym.upper()): continue
                     _alert_record(sym.upper())
                     atr = full_d.get("atr", full_d["curr"]*0.02)
@@ -401,21 +476,26 @@ async def hunter_loop(app_bot):
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
-    bot_app=ApplicationBuilder().token(BOT_TOKEN).build()
-    bot_app.add_handler(CommandHandler("start", start_cmd))
-    bot_app.add_handler(CommandHandler("myalerts", myalerts))
-    bot_app.add_handler(CommandHandler("scan", scan_now))
-    bot_app.add_handler(CommandHandler("auto", auto_cmd))
-    bot_app.add_handler(CommandHandler("all", all_cmd))
-    bot_app.add_handler(CommandHandler("history", all_cmd))
-    bot_app.add_handler(CommandHandler("alertstats", alertstats_cmd))
-    bot_app.add_handler(CommandHandler("logtrade", logtrade_cmd))
-    bot_app.add_handler(CommandHandler("setlimit", setlimit_cmd))
-    bot_app.add_handler(CommandHandler("pnl", pnl_cmd))
-    bot_app.add_handler(CommandHandler("mt5login", mt5login_cmd))
-    bot_app.add_handler(CommandHandler("autotrade", autotrade_cmd))
-    bot_app.add_handler(CommandHandler("setlot", setlot_cmd))
-    bot_app.add_handler(CommandHandler("setmt5", setmt5_cmd))
-    async def on_start(a): asyncio.create_task(hunter_loop(a))
-    bot_app.post_init=on_start
-    bot_app.run_polling()
+    if not BOT_TOKEN:
+        print("ERROR BOT_TOKEN not set in Render Env!")
+    else:
+        bot_app=ApplicationBuilder().token(BOT_TOKEN).build()
+        bot_app.add_handler(CommandHandler("start", start_cmd))
+        bot_app.add_handler(CommandHandler("myalerts", myalerts))
+        bot_app.add_handler(CommandHandler("scan", scan_now))
+        bot_app.add_handler(CommandHandler("auto", auto_cmd))
+        bot_app.add_handler(CommandHandler("all", all_cmd))
+        bot_app.add_handler(CommandHandler("history", all_cmd))
+        bot_app.add_handler(CommandHandler("alertstats", alertstats_cmd))
+        bot_app.add_handler(CommandHandler("benchmark", benchmark_cmd))
+        bot_app.add_handler(CommandHandler("logtrade", logtrade_cmd))
+        bot_app.add_handler(CommandHandler("setlimit", setlimit_cmd))
+        bot_app.add_handler(CommandHandler("pnl", pnl_cmd))
+        bot_app.add_handler(CommandHandler("mt5login", mt5login_cmd))
+        bot_app.add_handler(CommandHandler("autotrade", autotrade_cmd))
+        bot_app.add_handler(CommandHandler("setlot", setlot_cmd))
+        bot_app.add_handler(CommandHandler("setmt5", setmt5_cmd))
+        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        async def on_start(a): asyncio.create_task(hunter_loop(a))
+        bot_app.post_init=on_start
+        bot_app.run_polling()

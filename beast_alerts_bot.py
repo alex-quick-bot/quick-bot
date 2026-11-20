@@ -1,5 +1,5 @@
 """
-FATHER V15.4 - Stability & Signal Integrity
+FATHER V15.5 - Evidence-Based Reversal Watch
 SQLite ONLY | No PostgreSQL | No MT5 | No Exness connection
 Manual research only. No automated order placement, modification or closure.
 
@@ -62,7 +62,7 @@ if not 1 <= PORT <= 65535:
 if not DB_PATH:
     raise RuntimeError("DB_PATH cannot be empty.")
 
-VERSION = "15.4"
+VERSION = "15.5"
 SCAN_INTERVAL_SECONDS = 60
 TWELVE_DATA_REFRESH_SECONDS = 15 * 60
 YAHOO_CACHE_SECONDS = 5 * 60
@@ -76,13 +76,15 @@ STOP_ATR_MULTIPLE = 1.5
 REWARD_RISK_RATIO = 2.0
 RSI_OVERSOLD = 30.0
 RSI_OVERBOUGHT = 70.0
+REVERSAL_RECENT_BARS = 3
+SWING_LOOKBACK_BARS = 20
 MAX_STOP_PERCENT_WARNING = 8.0
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
-logger = logging.getLogger("FATHER_V15_4")
+logger = logging.getLogger("FATHER_V15_5")
 
 _known_users = set()
 _known_users_lock = threading.Lock()
@@ -557,7 +559,7 @@ def fetch_twelve_data(ticker):
     url = "https://api.twelvedata.com/time_series?" + params
     try:
         request = urllib.request.Request(
-            url, headers={"User-Agent": "FATHER-V15.4"}
+            url, headers={"User-Agent": "FATHER-V15.5"}
         )
         with urllib.request.urlopen(request, timeout=15) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -713,6 +715,10 @@ def calc_indicators(frame, ticker):
     atr = tr.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
 
     rsi_series = rsi(close)
+    # Structure levels exclude the current candle to avoid comparing the
+    # latest close against a range that already includes that same close.
+    prior_swing_high = high.shift(1).rolling(SWING_LOOKBACK_BARS).max()
+    prior_swing_low = low.shift(1).rolling(SWING_LOOKBACK_BARS).min()
     is_fx = ticker.endswith("=X")
     if "VOLUME" not in frame.columns:
         volume_state = "missing"
@@ -743,7 +749,12 @@ def calc_indicators(frame, ticker):
         "previous_price": close.iloc[-2],
         "rsi": rsi_series.iloc[-1],
         "rsi_prev": rsi_series.iloc[-2],
+        "rsi_low_recent": rsi_series.tail(REVERSAL_RECENT_BARS).min(),
+        "rsi_high_recent": rsi_series.tail(REVERSAL_RECENT_BARS).max(),
         "ema20": ema20_series.iloc[-1],
+        "ema20_prev": ema20_series.iloc[-2],
+        "prior_swing_high": prior_swing_high.iloc[-1],
+        "prior_swing_low": prior_swing_low.iloc[-1],
         "ema50": ema50_series.iloc[-1],
         "ema200": ema200_value,
         "macd": macd.iloc[-1],
@@ -843,37 +854,96 @@ def multipath_vote(data):
 
 
 def classify_signal(data, votes):
+    """Classify signals using momentum AND price-structure evidence.
+
+    An RSI extreme by itself never creates a reversal watch. A watch needs
+    improving/weakening momentum plus a price-structure event. A watch is
+    not a BUY/SELL instruction and does not receive entry/stop/target levels.
     """
-    Direction and entry quality are separated.
-    Extreme RSI blocks chasing an entry in the same direction.
-    Reversal watch requires improving momentum, not RSI alone.
-    """
-    if data["rsi"] <= RSI_OVERSOLD:
-        improving = (
-            data["rsi"] > data["rsi_prev"]
-            and data["macd_hist"] > data["macd_hist_prev"]
-        )
+    rsi_value = data["rsi"]
+    rsi_previous = data["rsi_prev"]
+    hist = data["macd_hist"]
+    hist_previous = data["macd_hist_prev"]
+    price = data["price"]
+    previous_price = data["previous_price"]
+    ema20 = data["ema20"]
+    ema20_previous = data["ema20_prev"]
+
+    bullish_momentum = rsi_value > rsi_previous and hist > hist_previous
+    bearish_momentum = rsi_value < rsi_previous and hist < hist_previous
+
+    bullish_ema_reclaim = price > ema20 and previous_price <= ema20_previous
+    bearish_ema_loss = price < ema20 and previous_price >= ema20_previous
+    bullish_swing_break = (
+        finite_number(data.get("prior_swing_high"))
+        and price > data["prior_swing_high"]
+    )
+    bearish_swing_break = (
+        finite_number(data.get("prior_swing_low"))
+        and price < data["prior_swing_low"]
+    )
+    bullish_structure = bullish_ema_reclaim or bullish_swing_break
+    bearish_structure = bearish_ema_loss or bearish_swing_break
+
+    recently_oversold = (
+        finite_number(data.get("rsi_low_recent"))
+        and data["rsi_low_recent"] <= RSI_OVERSOLD
+    )
+    recently_overbought = (
+        finite_number(data.get("rsi_high_recent"))
+        and data["rsi_high_recent"] >= RSI_OVERBOUGHT
+    )
+
+    # Recent extreme conditions stay in watch mode while the market is
+    # attempting to turn. Momentum alone is deliberately insufficient.
+    if recently_oversold:
+        if bullish_momentum and bullish_structure:
+            evidence = []
+            if bullish_ema_reclaim:
+                evidence.append("reclaimed EMA20")
+            if bullish_swing_break:
+                evidence.append("broke prior swing high")
+            return (
+                "REVERSAL WATCH",
+                "Bullish momentum is improving and price "
+                + " + ".join(evidence)
+                + ". Wait for another candle and trend confirmation; no BUY yet."
+            )
+        missing = []
+        if not bullish_momentum:
+            missing.append("momentum improvement")
+        if not bullish_structure:
+            missing.append("price confirmation")
         return (
-            "REVERSAL WATCH" if improving else "OVERSOLD",
-            "Downward pressure is extended. Avoid chasing a fresh SELL; "
-            "wait for a bounce and bearish rejection."
-            if not improving else
-            "Oversold momentum is improving. Possible reversal, but wait "
-            "for price confirmation before considering a BUY."
+            "OVERSOLD",
+            "Selling is extended. Do not chase a SELL. Waiting for "
+            + " and ".join(missing)
+            + "."
         )
 
-    if data["rsi"] >= RSI_OVERBOUGHT:
-        weakening = (
-            data["rsi"] < data["rsi_prev"]
-            and data["macd_hist"] < data["macd_hist_prev"]
-        )
+    if recently_overbought:
+        if bearish_momentum and bearish_structure:
+            evidence = []
+            if bearish_ema_loss:
+                evidence.append("lost EMA20")
+            if bearish_swing_break:
+                evidence.append("broke prior swing low")
+            return (
+                "REVERSAL WATCH",
+                "Bearish momentum is weakening and price "
+                + " + ".join(evidence)
+                + ". Wait for another candle and trend confirmation; no SELL yet."
+            )
+        missing = []
+        if not bearish_momentum:
+            missing.append("momentum weakening")
+        if not bearish_structure:
+            missing.append("price confirmation")
         return (
-            "REVERSAL WATCH" if weakening else "OVERBOUGHT",
-            "Upward pressure is extended. Avoid chasing a fresh BUY; "
-            "wait for a pullback and bullish support."
-            if not weakening else
-            "Overbought momentum is weakening. Possible reversal, but wait "
-            "for price confirmation before considering a SELL."
+            "OVERBOUGHT",
+            "Buying is extended. Do not chase a BUY. Waiting for "
+            + " and ".join(missing)
+            + "."
         )
 
     maximum = max(votes.values())
@@ -1552,7 +1622,7 @@ async def edit_or_send_hunter(app, uid, ticker, result):
                 chat_id=existing["chat_id"],
                 message_id=existing["message_id"],
                 text=text[:MAX_TELEGRAM_LENGTH],
-                reply_markup=main_menu_keyboard(),
+                reply_markup=back_keyboard(),
             )
             update_hunter_message_state(uid, ticker, direction)
             return
@@ -1597,7 +1667,7 @@ async def edit_or_send_hunter(app, uid, ticker, result):
     try:
         sent = await app.bot.send_message(
             chat_id=uid, text=text[:MAX_TELEGRAM_LENGTH],
-            reply_markup=main_menu_keyboard(),
+            reply_markup=back_keyboard(),
         )
         save_hunter_message(
             uid, ticker, sent.chat_id, sent.message_id, direction, utc_iso()
